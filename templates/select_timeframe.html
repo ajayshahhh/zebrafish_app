@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}Select Timeframe{% endblock %}
+
+{% block content %}
+<div class="container">
+    <h1 class="mb-3">Select Time Frame</h1>
+    <p>Valid time range: 0 to {{ video_length }} seconds</p>
+    <form method="POST" action="{{ url_for('process_timeframe') }}">
+        <input type="hidden" name="video_id" value="{{ video_id }}">
+        <div class="mb-3">
+            <label for="start_time" class="form-label">Start Time (seconds):</label>
+            <input type="number" class="form-control" id="start_time" name="start_time" step="0.01" required>
+        </div>
+        <div class="mb-3">
+            <label for="end_time" class="form-label">End Time (seconds):</label>
+            <input type="number" class="form-control" id="end_time" name="end_time" step="0.01" required>
+        </div>
+        <button type="submit" class="btn btn-primary" onclick="showLoading()">Process Video</button>
+    </form>
+
+    {% if error %}
+    <div class="alert alert-danger mt-3">
+        {{ error }}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

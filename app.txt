@@ -1,0 +1,513 @@
+import atexit
+import os
+import glob
+import sys
+import signal
+import math
+import shutil
+import threading
+import zipfile
+import csv
+import numpy as np
+import cv2
+import torch
+import segmentation_models_pytorch as smp
+import albumentations as albu
+import scipy.signal
+from itertools import product
+from scipy.signal import savgol_filter
+from torchvision.transforms import functional as TF
+from torch.utils.data import DataLoader, Dataset as BaseDataset
+
+from flask import Flask, request, render_template, redirect, url_for, send_from_directory, abort, send_file, after_this_request
+from werkzeug.utils import secure_filename
+import webbrowser
+import zipfile
+from flask import send_file, after_this_request, flash
+
+dir = 'media' +'/'
+input_dir = dir + 'uploaded_videos'
+uploaded_file_dir = '/' + input_dir + '/'
+output_dir = dir + 'image_output'
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def get_base_path():
+    if getattr(sys, 'frozen', False):
+        # Running in a PyInstaller bundle
+        return sys._MEIPASS
+    else:
+        # Running in a normal Python environment
+        return os.path.dirname(os.path.abspath(__file__))
+
+# Use this function to get the correct base path for all file references
+base_path = get_base_path()
+
+def load_model():
+    model_path = os.path.join(base_path, 'models', 'model.pth')
+    try:
+        model = torch.load(model_path, map_location=device)  # Load on the correct device
+        model.to(device)  # Move the model to the correct device
+        model.eval()  # Set the model to evaluation mode
+        return model
+    except Exception as e:
+        print(f"Failed to load the model: {e}")
+        return None
+
+model = load_model()
+if model is None:
+    raise RuntimeError("Model could not be loaded.")
+
+app = Flask(__name__)
+app.secret_key = '12345'
+# Update your folder paths
+app.config['UPLOAD_FOLDER'] = os.path.join(base_path, 'media', 'uploaded_videos')
+app.config['MASK_FOLDER'] = os.path.join(base_path, 'media', 'image_output')
+app.config['ALLOWED_EXTENSIONS'] = {'mp4'}
+
+if not os.path.exists(app.config['UPLOAD_FOLDER']):
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+if not os.path.exists(app.config['MASK_FOLDER']):
+    os.makedirs(app.config['MASK_FOLDER'], exist_ok=True)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+def ensure_directories_exist():
+    directories = [
+        app.config['UPLOAD_FOLDER'],
+        app.config['MASK_FOLDER'],
+        os.path.join(app.config['MASK_FOLDER'], 'masked_images'),
+        os.path.join(app.config['MASK_FOLDER'], 'annotated_masked_images')
+    ]
+
+    for directory in directories:
+        if not os.path.exists(directory):
+            os.makedirs(directory, exist_ok=True)
+            print(f"Created directory: {directory}")
+        else:
+            print(f"Directory already exists: {directory}")
+
+def calculate_video_length(video_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return 0  # Handle the error if the video cannot be opened
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    video_length = total_frames / fps
+    cap.release()
+    return int(video_length)
+
+def save_image(image, filename, directory):
+    if not os.path.exists(directory):
+        os.makedirs(directory, exist_ok=True)
+    cv2.imwrite(os.path.join(directory, filename), image)
+
+def process_video(video_file, model, start_time, end_time):
+    group_id = os.path.splitext(os.path.basename(video_file))[0]
+    cap = cv2.VideoCapture(video_file)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    
+    # Calculate the total number of frames to process based on the time frame
+    total_frames_to_process = int((end_time - start_time) * fps)
+
+    print(f"Processing {total_frames_to_process} frames from {start_time}s to {end_time}s.")
+    
+    cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000)  # Start at the given time in milliseconds
+    
+    mask_files = []  # Store the file paths of saved masks
+
+    for i in range(total_frames_to_process):
+        success, frame = cap.read()
+        if not success:
+            break
+
+        # Preprocess the frame as required by the model
+        processed_frame = cv2.resize(frame[608-480:608+480, 912-512:912+512], (512, 480))
+        frame_tensor = TF.to_tensor(processed_frame).unsqueeze(0).to(device)  # Add batch dimension and move to device
+        
+        with torch.no_grad():
+            output = model(frame_tensor)
+        
+        output_image = output_to_image(output)
+        
+        # Save each mask separately
+        mask_filename = f"{group_id}_{i}.png"
+        mask_filepath = os.path.join(output_dir, mask_filename)
+        save_image(output_image, mask_filename, output_dir)
+
+        mask_files.append(mask_filepath)
+
+    cap.release()
+    
+    # Define the CSV output path
+    csv_output_path = os.path.join(app.config['MASK_FOLDER'], f"{group_id}_analysis.csv")
+    
+    # Pass the list of mask files to the next processing function
+    process_masks(mask_files, csv_output_path)
+
+def get_video_length(video_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print("Error: Could not open video.")
+        return None
+    
+    fps = cap.get(cv2.CAP_PROP_FPS)  # Frames per second
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))  # Total number of frames
+    duration = frame_count / fps  # Duration in seconds
+    
+    cap.release()
+    return duration
+
+
+    group_id = os.path.splitext(os.path.basename(video_file))[0]
+    cap = cv2.VideoCapture(video_file)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000)  # Start at the given time in milliseconds
+    
+    masks = []  # Store the masks
+    mask_files = []  # Store the file paths of saved masks
+
+    while True:
+        current_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000  # Current time in seconds
+        if current_time > end_time:
+            break
+
+        success, frame = cap.read()
+        if not success:
+            break
+
+        # Preprocess the frame as required by the model
+        processed_frame = cv2.resize(frame[608-480:608+480, 912-512:912+512], (512, 480))
+        frame_tensor = TF.to_tensor(processed_frame).unsqueeze(0)  # Add batch dimension
+        
+        with torch.no_grad():
+            output = model(frame_tensor)
+        
+        output_image = output_to_image(output)
+        
+        # Save each mask separately
+        mask_filename = f"{group_id}_{int(current_time)}.png"
+        mask_filepath = os.path.join(output_dir, mask_filename)
+        save_image(output_image, mask_filename, output_dir)
+
+        mask_files.append(mask_filepath) 
+
+    cap.release()
+    
+    # Define the CSV output path
+    csv_output_path = os.path.join(app.config['MASK_FOLDER'], f"{group_id}_analysis.csv")
+    
+    # Pass the list of mask files to the next processing function
+    process_masks(mask_files, csv_output_path)
+
+def process_masks(mask_files, csv_output_path):
+    largest_contour = None
+    smallest_contour = None
+    largest_area = -1
+    smallest_area = float('inf')
+    largest_file = None
+    smallest_file = None
+
+    for mask_file in mask_files:
+        mask = cv2.imread(mask_file, 0)
+        white_pixel_count = np.sum(mask == 255)
+         
+        if white_pixel_count == 0:
+            print(f"Skipping {mask_file} as it contains no white pixels.")
+            continue  # Skip this mask if it has no white pixels
+        
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Initialize variables for the current mask
+        current_largest_contour = None
+        current_largest_area = -1
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area > current_largest_area:
+                current_largest_area = area
+                current_largest_contour = contour
+
+        # Compare to find the global largest and smallest based on white pixel count
+        if white_pixel_count > largest_area:
+            largest_area = white_pixel_count
+            largest_contour = current_largest_contour
+            largest_file = mask_file
+
+        if white_pixel_count < smallest_area:
+            smallest_area = white_pixel_count
+            smallest_contour = current_largest_contour
+            smallest_file = mask_file
+
+        # Annotate and save the current mask with its contour and axes
+        annotate_and_save(current_largest_contour, mask_file, white_pixel_count, current_largest_area)
+
+    # Write the results to CSV
+    with open(csv_output_path, mode='w', newline='') as csv_file:
+        fieldnames = ['File', 'White Pixel Count', 'Contour Area', 'Long Axis', 'Short Axis', 'Diameter']
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+
+        writer.writeheader()
+
+        if largest_contour is not None:
+            writer.writerow(calculate_contour_details(largest_contour, largest_file, largest_area))
+        if smallest_contour is not None:
+            writer.writerow(calculate_contour_details(smallest_contour, smallest_file, smallest_area))
+
+def calculate_contour_details(contour, file_path, white_pixel_count):
+    area = cv2.contourArea(contour)
+    (x, y), (MA, ma), angle = cv2.fitEllipse(contour)
+    long_axis = max(MA, ma)
+    short_axis = min(MA, ma)
+    diameter = np.sqrt(4 * area / np.pi)
+
+    return {
+        'File': file_path,
+        'White Pixel Count': white_pixel_count,
+        'Contour Area': area,
+        'Long Axis': long_axis,
+        'Short Axis': short_axis,
+        'Diameter': diameter
+    }
+def find_intersection(center, direction, contour):
+    """Find the intersection of a line (center -> direction) with the contour."""
+    x, y = center
+    dx, dy = direction
+
+    for t in np.linspace(0, 2000, num=2000):
+        x_end = int(x + t * dx)
+        y_end = int(y + t * dy)
+        
+        if cv2.pointPolygonTest(contour, (x_end, y_end), False) < 0:
+            # Once the point is outside the contour, we return the previous point
+            return (int(x_end - dx), int(y_end - dy))  # Ensure the point is an integer tuple
+    
+    return (int(x_end), int(y_end))  # In case it doesn't find any intersection, return an integer tuple
+
+def annotate_and_save(contour, file_path, white_pixel_count, contour_area):
+    # Read the original image
+    image = cv2.imread(file_path)
+    if contour is not None:
+        # Draw the contour
+        cv2.drawContours(image, [contour], -1, (0, 255, 0), 2)  # Green contour
+
+        # Fit an ellipse to the contour
+        (x, y), (MA, ma), angle = cv2.fitEllipse(contour)
+
+        # Center of the ellipse
+        center = (int(x), int(y))
+        
+        # Convert angles to radians
+        angle_rad = np.deg2rad(angle)
+        long_axis_vector = (np.cos(angle_rad), np.sin(angle_rad))
+        short_axis_vector = (-np.sin(angle_rad), np.cos(angle_rad))
+
+        # Find intersections along the long axis
+        long_axis_end_1 = find_intersection(center, long_axis_vector, contour)
+        long_axis_end_2 = find_intersection(center, (-long_axis_vector[0], -long_axis_vector[1]), contour)
+        
+        # Find intersections along the short axis
+        short_axis_end_1 = find_intersection(center, short_axis_vector, contour)
+        short_axis_end_2 = find_intersection(center, (-short_axis_vector[0], -short_axis_vector[1]), contour)
+
+        # Draw the axes only if valid points are found
+        if long_axis_end_1 and long_axis_end_2:
+            cv2.line(image, long_axis_end_1, long_axis_end_2, (255, 0, 0), 2)  # Blue long axis
+
+        if short_axis_end_1 and short_axis_end_2:
+            cv2.line(image, short_axis_end_1, short_axis_end_2, (0, 0, 255), 2)  # Red short axis
+
+        # Mark the center point
+        cv2.circle(image, center, 3, (0, 0, 0), -1)  # Black center point
+    
+    # Create a new filename for the annotated image
+    annotated_filename = file_path.replace('.png', '_annotated.png')
+    
+    # Save the annotated image
+    save_image(image, os.path.basename(annotated_filename), os.path.dirname(file_path))
+    
+    return annotated_filename
+def output_to_image(output):
+    output_image = output.squeeze().cpu().numpy()  # Convert tensor to NumPy array and remove batch dimension
+
+    if output_image.ndim == 2:  # If it's a single-channel image
+        output_image = (output_image * 255).astype(np.uint8)
+
+    if output_image.ndim == 3 and output_image.shape[0] == 3:  # If it's an RGB image
+        output_image = output_image.transpose(1, 2, 0)  # Convert from (C, H, W) to (H, W, C)
+        output_image = (output_image * 255).astype(np.uint8)
+    
+    return output_image
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+
+def cleanup_folders():
+    folders_to_cleanup = [app.config['UPLOAD_FOLDER'], app.config['MASK_FOLDER']]
+    for folder in folders_to_cleanup:
+        for filename in os.listdir(folder):
+            file_path = os.path.join(folder, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                print(f'Failed to delete {file_path}. Reason: {e}')
+
+@app.route('/', methods=['GET', 'POST'])
+def upload_file():
+    if request.method == 'POST':
+        file = request.files['file']
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(video_path)
+            group_id = os.path.splitext(filename)[0]  # Use this as video_id
+            
+            # After upload, redirect to the time selection page
+            return render_template('select_timeframe.html', video_id=group_id, video_length=calculate_video_length(video_path))
+    return render_template('index.html')
+
+@app.route('/process_timeframe', methods=['POST'])
+def process_timeframe():
+    video_id = request.form['video_id']
+    start_time = int(request.form['start_time'])
+    end_time = int(request.form['end_time'])
+
+    video_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{video_id}.mp4")
+    mask_dir = app.config['MASK_FOLDER']
+    csv_output_path = os.path.join(app.config['MASK_FOLDER'], f"{video_id}_analysis.csv")
+    
+    # Call the process_video function with the selected time frame
+    process_video(video_path, model, start_time, end_time)
+    
+    return render_template('processing_success.html', video_id=video_id)
+
+@app.route('/select_timeframe/<video_id>/<video_length>', methods=['GET', 'POST'])
+def select_timeframe(video_id, video_length):
+    if request.method == 'POST':
+        start_time = request.form.get('start_time')
+        end_time = request.form.get('end_time')
+
+        # Convert video_length to float for comparison
+        video_length = float(video_length)
+
+        # Validate the time frame
+        try:
+            start_time = float(start_time)
+            end_time = float(end_time)
+
+            if start_time < 0 or end_time > video_length or start_time >= end_time:
+                raise ValueError("Invalid time frame")
+
+            # Process the video using the selected time frame
+            video_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{video_id}.mp4")
+            process_video(video_path, model, start_time, end_time)
+
+            return render_template('processing_success.html', video_id=video_id)
+
+        except ValueError:
+            # If the time frame is invalid, re-render the page with an error message
+            return render_template('select_timeframe.html', video_id=video_id, video_length=video_length, error="Please enter a valid time frame.")
+
+    # If GET request, show the time-frame selection form
+    return render_template('select_timeframe.html', video_id=video_id, video_length=video_length)
+
+@app.route('/upload/<filename>')
+def uploaded_file(filename):
+    # Ensure this page does something visible or returns a response
+    return render_template('select_timeframe.html', filename=filename)
+
+@app.route('/downloads/<filename>')
+def download_file(filename):
+    directory = app.config['UPLOAD_FOLDER']
+    if not os.path.isfile(os.path.join(directory, filename)):
+        abort(404)  # Return a 404 not found error if the file does not exist
+    return send_from_directory(directory, filename, as_attachment=True)
+
+@app.route('/close_app', methods=['GET', 'POST'])
+def close_app():
+    print("Closing the application...")
+    return render_template('app_closed.html')
+    
+@app.route('/shutdown')
+def shutdown():
+    print ("App has closed.")
+    os.kill(os.getpid(), signal.SIGINT)  # Sends an interrupt signal to the process
+    return "App has closed."
+
+@app.route('/download_results/<video_id>')
+def download_results(video_id):
+    base_folder = os.path.join(app.config['MASK_FOLDER'], f"{video_id}_results")
+    masked_images_folder = os.path.join(base_folder, 'masked_images')
+    annotated_images_folder = os.path.join(base_folder, 'annotated_masked_images')
+    csv_path = os.path.join(base_folder, f"{video_id}_analysis.csv")
+
+    print(f"Creating base folder: {base_folder}")
+
+    # Ensure the base folder exists
+    if not os.path.exists(base_folder):
+        os.makedirs(base_folder, exist_ok=True)
+        
+    # Move the masked images
+    if not os.path.exists(masked_images_folder):
+        os.makedirs(masked_images_folder, exist_ok=True)
+    for file in os.listdir(app.config['MASK_FOLDER']):
+        if file.startswith(video_id) and file.endswith('.png') and 'annotated' not in file:
+            shutil.copy(os.path.join(app.config['MASK_FOLDER'], file), masked_images_folder)
+            print(f"Copied {file} to {masked_images_folder}")
+
+    # Move the annotated images
+    if not os.path.exists(annotated_images_folder):
+        os.makedirs(annotated_images_folder, exist_ok=True)
+    for file in os.listdir(app.config['MASK_FOLDER']):
+        if file.startswith(video_id) and file.endswith('annotated.png'):
+            shutil.copy(os.path.join(app.config['MASK_FOLDER'], file), annotated_images_folder)
+            print(f"Copied {file} to {annotated_images_folder}")
+
+    # Move the CSV file
+    if os.path.exists(os.path.join(app.config['MASK_FOLDER'], f"{video_id}_analysis.csv")):
+        shutil.copy(os.path.join(app.config['MASK_FOLDER'], f"{video_id}_analysis.csv"), base_folder)
+        print(f"Copied CSV to {base_folder}")
+
+    # Create a ZIP file
+    zip_filename = f"{video_id}_results.zip"
+    zip_path = os.path.join(app.config['MASK_FOLDER'], zip_filename)
+    
+    with zipfile.ZipFile(zip_path, 'w') as zipf:
+        for root, dirs, files in os.walk(base_folder):
+            for file in files:
+                zipf.write(os.path.join(root, file), os.path.relpath(os.path.join(root, file), base_folder))
+                print(f"Zipped {file} into {zip_path}")
+
+    # Clean up the result directory
+    shutil.rmtree(base_folder)
+
+    @after_this_request
+    def remove_file(response):
+        try:
+            os.remove(zip_path)  # Remove the ZIP file after download
+        except Exception as error:
+            app.logger.error("Error removing or closing downloaded file handle", error)
+        return response
+
+    return send_file(zip_path, as_attachment=True)
+def open_browser():
+    """Open the web browser."""
+    webbrowser.open_new('http://localhost:5007') 
+
+if __name__ == '__main__':
+    ensure_directories_exist()
+    # Use threading to prevent blocking the server start
+    threading.Timer(1.25, open_browser).start()
+    app.run(host='0.0.0.0', port=5007)
+
+
+atexit.register(cleanup_folders)
+
+if getattr(sys, 'frozen', False):
+    print("Temporary directory for bundled files:", sys._MEIPASS)
+    

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}Upload Video{% endblock %}
+
+{% block content %}
+<div class="container">
+    <h1 class="mb-3">Upload Your Video</h1>
+    <div id="alertBox" class="alert alert-warning collapse" role="alert">
+        Please select a file to upload.
+    </div>
+    <form method="POST" enctype="multipart/form-data" action="{{ url_for('upload_file') }}" id="uploadForm">
+        <div class="mb-3">
+            <label for="fileUpload" class="form-label">Choose video file to upload (MP4 only):</label>
+            <input type="file" class="form-control" id="fileUpload" name="file" accept=".mp4">
+        </div>
+        <button type="button" class="btn btn-primary" onclick="checkFile()">Upload Video</button>
+    </form>
+</div>
+
+<script>
+    function checkFile() {
+        var fileInput = document.getElementById('fileUpload');
+        var filePath = fileInput.value;
+
+        if (filePath) {
+            document.getElementById('uploadForm').submit(); // Submit the form if a file is selected
+            showLoading(); // Show loading animation
+        } else {
+            var alertBox = document.getElementById('alertBox');
+            if (alertBox.classList.contains('collapse')) {
+                alertBox.classList.remove('collapse'); // Show the Bootstrap alert
+            }
+        }
+    }
+
+    document.getElementById('uploadForm').addEventListener('submit', function() {
+        showLoading(); // Show the loading overlay when the form is submitted
+    });
+</script>
+{% endblock %}

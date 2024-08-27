@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Processing Complete</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="mb-3">Processing Complete!</h1>
+        <p>Your masks and CSV file have been successfully generated.</p>
+        <p>You can download the results below:</p>
+    
+        <div class="mb-3">
+            <a href="{{ url_for('download_results', video_id=video_id) }}" class="btn btn-success" onclick="showLoading()">Download Results</a>
+        </div>
+    
+        <!-- Go Back to Upload New Video -->
+        <div class="mb-3">
+            <a href="{{ url_for('index') }}" class="btn btn-primary">Upload New Video</a>
+        </div>
+    
+        <!-- Close App -->
+        <div class="close-app-btn">
+            <form onsubmit="handleCloseApp(event)" method="post">
+                <button type="submit" class="btn btn-danger">Close App</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS and dependencies -->
+    <script>
+        function closeApp() {
+            window.close(); // This will close the tab
+            fetch('/close_app', {method: 'POST'}); // This will trigger the server-side shutdown
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.11.6/dist/umd/popper.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.min.js"></script>
+    <script>
+        function handleCloseApp(event) {
+            event.preventDefault();
+
+            // Redirect to the close app confirmation page
+            fetch('/close_app')
+                .then(response => response.text())
+                .then(html => {
+                    document.body.innerHTML = html;
+                    
+                    // After a delay, shut down the server
+                    setTimeout(function() {
+                        fetch('/shutdown');
+                    }, 5000);  // 5-second delay before shutting down
+                });
+        }
+    </script>
+</body>
+</html>
