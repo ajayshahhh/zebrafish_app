@@ -48,7 +48,7 @@ Make sure to place the pre-trained model (model.pth) inside the models directory
 Activate your virtual environment (if not already activated) and run the Flask application:
 ```bash
 source venv/bin/activate   # On Windows use `venv\Scripts\activate`
-python app.py
+flask run
 ```
 The application will automatically open in your default web browser at http://localhost:5007.
 
