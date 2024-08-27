@@ -7,7 +7,6 @@ This repository contains a Flask application for processing zebrafish video file
 - [Installation](#installation)
 - [Usage](#usage)
 - [Directory Structure](#directory-structure)
-- [Endpoints](#endpoints)
 - [Notes](#notes)
 - [Troubleshooting](#troubleshooting)
 
