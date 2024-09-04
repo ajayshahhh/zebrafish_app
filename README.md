@@ -61,6 +61,7 @@ The application will automatically open in your default web browser at http://lo
 
 ## Directory Structure
 Below is the directory structure for the application:
+```bash
   zebrafish_app/
 │
 ├── app.py                 # Main Flask application file
@@ -77,6 +78,7 @@ Below is the directory structure for the application:
 └── static/
     ├── styles.css         # CSS for styling the app
     └── scripts.js         # JavaScript for handling UI interactions
+```
 
 ## Notes
 - Ensure that the model.pth file is placed correctly inside the models directory before running the application.
